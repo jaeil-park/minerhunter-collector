@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 <#
-  MinerHunter Collector v1.1.0  —  읽기 전용 수집기
+  MinerHunter Collector v1.1.1  —  읽기 전용 수집기
 
   이 스크립트는 아무것도 판정하지 않고, 아무것도 바꾸지 않는다.
   프로세스·서비스·예약작업·자동실행·Defender 설정·파일 목록·DNS 캐시를 있는 그대로
@@ -17,7 +17,7 @@ param([string]$OutFile, [switch]$Upload, [string]$Code, [string]$Server = 'https
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 
-$CollectorVersion = '1.1.0'
+$CollectorVersion = '1.1.1'
 $Schema           = 'minerhunter.collect/1'
 $Now              = Get-Date
 
@@ -155,8 +155,20 @@ foreach ($n in 'windir', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)') {
 }
 
 # ---- Defender ----
-$mp = Get-MpPreference; $st = Get-MpComputerStatus
+# 타사 백신이 Defender 를 대체해 WinDefend 가 멈춰 있으면 Mp* cmdlet 이 0x800106ba 로 실패한다.
+# 이 실패가 수집을 끊으면 안 되므로 각각 따로 잡고, 실패 사실은 query_errors 에 남긴다
+$mpErrors = [ordered]@{}
+# 실행할 명령은 호출부에 그대로 적는다 (verify.py 와 사람이 무엇이 실행되는지 읽을 수 있게)
+function Invoke-Mp([string]$name, [scriptblock]$query) {
+    try { return (& $query) }
+    catch { $mpErrors[$name] = Str $_.Exception.Message }   # 값 없이 끝낸다 — $null 을 내보내면 파이프라인에 빈 항목이 생긴다
+}
+$mp = Invoke-Mp 'Get-MpPreference' { Get-MpPreference -ErrorAction Stop }
+$st = Invoke-Mp 'Get-MpComputerStatus' { Get-MpComputerStatus -ErrorAction Stop }
+$wd = Get-Service WinDefend
 $defender = [ordered]@{
+    windefend_service = $(if ($wd) { [ordered]@{ status = Str $wd.Status; start_type = Str $wd.StartType } } else { $null })
+    query_errors = $mpErrors
     status = $(if ($st) { [ordered]@{ am_running_mode = Str $st.AMRunningMode; real_time_protection_enabled = [bool]$st.RealTimeProtectionEnabled
                                       is_tamper_protected = [bool]$st.IsTamperProtected; signature_last_updated = Iso $st.AntivirusSignatureLastUpdated } } else { $null })
     exclusion_process   = @(@($mp.ExclusionProcess) | Where-Object { $_ } | ForEach-Object { [string]$_ })
@@ -164,7 +176,7 @@ $defender = [ordered]@{
     exclusion_extension = @(@($mp.ExclusionExtension) | Where-Object { $_ } | ForEach-Object { [string]$_ })
     av_products = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | ForEach-Object {
         [ordered]@{ display_name = Str $_.displayName; product_state = [int64]$_.productState } })
-    detections = @(Get-MpThreatDetection | Sort-Object InitialDetectionTime -Descending | Select-Object -First 10 | ForEach-Object {
+    detections = @(Invoke-Mp 'Get-MpThreatDetection' { Get-MpThreatDetection -ErrorAction Stop } | Sort-Object InitialDetectionTime -Descending | Select-Object -First 10 | ForEach-Object {
         [ordered]@{ time = Iso $_.InitialDetectionTime; threat_id = Str $_.ThreatID; action_success = [bool]$_.ActionSuccess; resources = @($_.Resources | ForEach-Object { [string]$_ }) } })
 }
 
